@@ -17,7 +17,17 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data"))
 CHANNELS_DIR = DATA_DIR / "channels"
 VIDEO_CACHE_DIR = DATA_DIR / "videos"
 
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+# Per-video notes are high volume, so they use the low-cost model; the single
+# topic-grouping call needs more judgment and uses a stronger one.
+NOTES_MODEL = os.environ.get("NOTES_MODEL", "claude-haiku-5-5")
+OUTLINE_MODEL = os.environ.get("OUTLINE_MODEL", "claude-sonnet-5-5")
+
+# USD per million tokens (input, output), used to show what each channel cost.
+PRICES = {
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-opus-5-5": (4.00, 20.00),
+}
 WORKERS = int(os.environ.get("WORKERS", "4"))
 
 _client = None
@@ -216,25 +226,39 @@ OUTLINE_SYSTEM = (
 )
 
 
-def _parse(system: str, prompt: str, output_format):
+def _cost(model: str, usage) -> float:
+    price_in, price_out = PRICES.get(model, (0.0, 0.0))
+    if model == "claude-haiku-5-5" and usage.input_tokens > 100_000:
+        price_in, price_out = 0.50, 2.50  # Haiku's long-prompt rate card
+    return (usage.input_tokens * price_in + usage.output_tokens * price_out) / 1_000_000
+
+
+def _parse(model: str, effort: str, system: str, prompt: str, output_format):
+    """Returns (parsed output, cost in USD). Haiku refusals are retried on OUTLINE_MODEL."""
+    kwargs = {}
+    if model != "claude-haiku-5-5":  # Haiku has no server-side refusal fallback
+        kwargs = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
     response = client().beta.messages.parse(
-        model=MODEL,
+        model=model,
         max_tokens=16000,
         system=system,
         messages=[{"role": "user", "content": prompt}],
-        output_config={"effort": "medium"},
+        output_config={"effort": effort},
         output_format=output_format,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
+        **kwargs,
     )
+    cost = _cost(response.model or model, response.usage)
     if response.stop_reason == "refusal":
+        if model != OUTLINE_MODEL:
+            parsed, retry_cost = _parse(OUTLINE_MODEL, effort, system, prompt, output_format)
+            return parsed, cost + retry_cost
         raise RuntimeError("Claude declined to process this content")
     if response.stop_reason == "max_tokens":
         raise RuntimeError("Response was cut off (too long)")
-    return response.parsed_output
+    return response.parsed_output, cost
 
 
-def make_video_notes(video: dict) -> dict:
+def make_video_notes(video: dict) -> tuple[dict, float]:
     snippets = fetch_transcript(video["id"])
     if snippets:
         source = "transcript"
@@ -251,21 +275,21 @@ def make_video_notes(video: dict) -> dict:
             f"Description:\n{details['description']}\n\nCreator chapters:\n{chapters or '(none)'}"
         )
     prompt = f"Video title: {video['title']}\n\n{body}"
-    notes = _parse(NOTES_SYSTEM, prompt, VideoNotes)
+    notes, cost = _parse(NOTES_MODEL, "medium", NOTES_SYSTEM, prompt, VideoNotes)
     result = notes.model_dump()
     result["chapters"].sort(key=lambda c: c["start_seconds"])
     result["source"] = source
-    return result
+    return result, cost
 
 
-def make_outline(videos: list[dict]) -> list[dict]:
+def make_outline(videos: list[dict]) -> tuple[list[dict], float]:
     lines = []
     for v in videos:
         n = v["notes"]
         first_para = n["summary"].split("\n")[0][:400]
         lines.append(f"- id={v['id']} | {v['title']} | topics: {', '.join(n['topics'])} | {first_para}")
     prompt = "Videos:\n" + "\n".join(lines)
-    outline = _parse(OUTLINE_SYSTEM, prompt, CourseOutline)
+    outline, cost = _parse(OUTLINE_MODEL, "medium", OUTLINE_SYSTEM, prompt, CourseOutline)
 
     # Guarantee every video lands in exactly one module, whatever the model returned.
     known = {v["id"] for v in videos}
@@ -280,7 +304,7 @@ def make_outline(videos: list[dict]) -> list[dict]:
     if missing:
         modules.append({"title": "Other videos", "description": "Videos that were not placed in a module.",
                         "video_ids": missing})
-    return modules
+    return modules, cost
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +328,7 @@ def start_job(raw_url: str, limit: int | None) -> str:
     if existing and existing["status"] in ("listing", "summarizing", "organizing"):
         return slug
     save_channel({
+        "cost_usd": existing.get("cost_usd", 0.0) if existing else 0.0,
         "slug": slug, "url": url, "title": raw_url.strip(), "status": "listing",
         "created_at": datetime.now(timezone.utc).isoformat(), "limit": limit,
         "total": 0, "done": 0, "failed": 0, "error": None, "videos": [], "modules": [],
@@ -324,16 +349,17 @@ def _run_job(slug: str, url: str, limit: int | None) -> None:
         update_channel(slug, set_listing)
 
         def process(index: int, video: dict):
-            notes, error = _cached_notes(video["id"]), None
+            notes, error, cost = _cached_notes(video["id"]), None, 0.0
             if notes is None:
                 try:
-                    notes = make_video_notes(video)
+                    notes, cost = make_video_notes(video)
                     _cache_notes(video["id"], notes)
                 except Exception as e:  # keep going; one bad video shouldn't sink the channel
                     error = str(e)
 
             def record(d):
                 d["videos"][index].update(notes=notes, error=error)
+                d["cost_usd"] += cost
                 d["done"] += 1
                 d["failed"] += error is not None
             update_channel(slug, record)
@@ -346,8 +372,8 @@ def _run_job(slug: str, url: str, limit: int | None) -> None:
         ready = [v for v in data["videos"] if v["notes"]]
         if not ready:
             raise RuntimeError("Could not produce notes for any video (see per-video errors)")
-        modules = make_outline(ready)
-        update_channel(slug, lambda d: d.update(modules=modules, status="done"))
+        modules, cost = make_outline(ready)
+        update_channel(slug, lambda d: d.update(modules=modules, status="done", cost_usd=d["cost_usd"] + cost))
     except Exception as e:
         update_channel(slug, lambda d: d.update(status="error", error=str(e)))
 

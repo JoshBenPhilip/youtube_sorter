@@ -85,6 +85,7 @@ function render(d) {
   let status = STATUS_TEXT[d.status] || d.status;
   if (d.total) status += ` ${d.done} of ${d.total} videos processed` + (d.failed ? ` (${d.failed} failed)` : "") + ".";
   if (d.error) status += " " + d.error;
+  if (d.cost_usd) status += ` Claude cost so far: $${d.cost_usd < 0.01 ? d.cost_usd.toFixed(4) : d.cost_usd.toFixed(2)}.`;
   document.getElementById("status").textContent = status;
   const running = !["done", "error"].includes(d.status);
   document.getElementById("progress-wrap").hidden = !running;

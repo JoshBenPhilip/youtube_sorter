@@ -33,18 +33,28 @@ python app.py
 1. `yt-dlp` lists the channel's uploads (Videos tab, newest first). No YouTube API key needed.
 2. `youtube-transcript-api` pulls each video's captions (English preferred, otherwise any language). If a video
    has no captions, the notes come from its description and chapters instead, and the page says so.
-3. Claude writes the summary, takeaways, and timestamped chapters for each video (4 videos at a time).
-4. Claude groups all the videos into course modules, ordered foundational → advanced.
+3. Claude Haiku writes the summary, takeaways, and timestamped chapters for each video (4 videos at a time).
+4. Claude Sonnet groups all the videos into course modules, ordered foundational → advanced.
 
 Results are saved in `data/`. Each video's notes are cached, so **Re-run** on a channel only pays for new videos
 (and re-does the topic grouping).
 
 ## Cost and time
 
-Uses `claude-opus-5-5` by default. A typical 15-20 minute video costs a few cents, so a 100-video channel is
-roughly $5-10 and takes 10-20 minutes. Set **Max videos** to around 10 for a first test. To use a cheaper
-model, set `CLAUDE_MODEL=claude-sonnet-5-5` in `.env`. Requests use Claude's server-side refusal fallback, so if
-the main model declines a video, a fallback model handles it instead of the video failing.
+Built to be cheap:
+
+- Each video's notes are written by `claude-haiku-5-5`, Claude's low-cost model. A typical 15-20 minute video
+  costs well under a cent.
+- The one call that groups the whole channel into modules uses `claude-sonnet-5-5`, which is better at that
+  judgment call. It runs once per channel and usually costs a few cents.
+- Notes are cached, so re-running a channel only pays for new videos.
+
+Expect a 100-video channel to cost well under a dollar. The channel page shows the actual Claude spend as it runs.
+Set **Max videos** to around 10 for a first test.
+
+To change models, set `NOTES_MODEL` or `OUTLINE_MODEL` in `.env` (for example `NOTES_MODEL=claude-sonnet-5-5` for
+richer notes at roughly 20x the cost). If Haiku declines to process a video, it is retried on the outline model,
+which uses Claude's server-side refusal fallback.
 
 ## Troubleshooting
 
