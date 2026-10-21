@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Channel · YouTube Course Sorter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="top"><a class="brand" href="/">▶ YouTube Course Sorter</a></header>
+<main class="wrap">
+  <h1 id="title">Loading…</h1>
+  <div id="status" class="muted"></div>
+  <div class="progress" id="progress-wrap"><div id="progress"></div></div>
+
+  <div class="toolbar" id="toolbar" hidden>
+    <input type="search" id="search" placeholder="Search videos, summaries, topics…">
+    <button class="btn secondary" id="expand">Expand all</button>
+    <button class="btn secondary" id="collapse">Collapse all</button>
+    <a class="btn secondary" id="export-md" href="/channel/{{ slug }}/export.md">Download outline (Markdown)</a>
+    <a class="btn secondary" href="/channel/{{ slug }}/export.json">Download data (JSON)</a>
+  </div>
+  <form id="rerun" method="post" action="/channel/{{ slug }}/rerun" hidden>
+    <button type="submit">Re-run</button>
+    <small class="muted">Videos already summarized are reused, so this is cheap.</small>
+  </form>
+
+  <div class="layout" id="layout" hidden>
+    <nav class="modules card" id="nav"></nav>
+    <div id="content"></div>
+  </div>
+</main>
+
+<script>
+const SLUG = {{ slug | tojson }};
+const STATUS_TEXT = {
+  listing: "Finding the channel's videos…",
+  summarizing: "Writing notes for each video…",
+  organizing: "Grouping videos into topic modules…",
+  done: "Done.",
+  error: "Something went wrong.",
+};
+let lastKey = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = sec => {
+  sec = Math.floor(sec); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+};
+
+function videoHtml(v) {
+  const n = v.notes;
+  const tags = n ? n.topics.map(t => `<span class="pill">${esc(t)}</span>`).join("") : "";
+  const dur = v.duration ? `<span class="pill">${fmt(v.duration)}</span>` : "";
+  let body;
+  if (n) {
+    const toc = n.chapters.map(c => `
+      <li><a class="ts" target="_blank" href="https://www.youtube.com/watch?v=${esc(v.id)}&t=${c.start_seconds}s">${fmt(c.start_seconds)}</a>
+        <strong>${esc(c.title)}</strong>
+        <ul>${c.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul></li>`).join("");
+    body = `
+      <h3>Summary</h3>
+      <div class="summary">${n.summary.split(/\n+/).map(p => `<p>${esc(p)}</p>`).join("")}</div>
+      <h3>Key takeaways</h3>
+      <ul>${n.key_takeaways.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+      <h3>Table of contents</h3>
+      <ol class="toc">${toc}</ol>
+      ${n.source === "description" ? `<p class="muted"><small>No captions were available, so these notes come from the video description only.</small></p>` : ""}
+      <p><a target="_blank" href="https://www.youtube.com/watch?v=${esc(v.id)}">Watch on YouTube ↗</a></p>`;
+  } else {
+    body = v.error ? `<p class="err">Could not process: ${esc(v.error)}</p>` : `<p class="muted">Waiting…</p>`;
+  }
+  const searchText = [v.title, n?.summary, ...(n?.topics || []), ...(n?.key_takeaways || []),
+                      ...(n?.chapters || []).map(c => c.title)].join(" ").toLowerCase();
+  return `<details class="video" data-id="${esc(v.id)}" data-search="${esc(searchText)}">
+    <summary><img loading="lazy" src="${esc(v.thumbnail)}" alt="">
+      <div><div class="vtitle">${esc(v.title)}</div><div class="tags">${dur}${tags}${v.error ? '<span class="pill error">failed</span>' : ""}</div></div>
+    </summary>
+    <div class="body">${body}</div></details>`;
+}
+
+function render(d) {
+  document.getElementById("title").textContent = d.title;
+  document.title = d.title + " · YouTube Course Sorter";
+  let status = STATUS_TEXT[d.status] || d.status;
+  if (d.total) status += ` ${d.done} of ${d.total} videos processed` + (d.failed ? ` (${d.failed} failed)` : "") + ".";
+  if (d.error) status += " " + d.error;
+  document.getElementById("status").textContent = status;
+  const running = !["done", "error"].includes(d.status);
+  document.getElementById("progress-wrap").hidden = !running;
+  document.getElementById("progress").style.width = d.total ? (100 * d.done / d.total) + "%" : "5%";
+  document.getElementById("rerun").hidden = running;
+  document.getElementById("export-md").hidden = d.status !== "done";
+
+  if (!d.videos.length) return;
+  const open = new Set([...document.querySelectorAll("details.video[open]")].map(e => e.dataset.id));
+  const byId = Object.fromEntries(d.videos.map(v => [v.id, v]));
+  const groups = d.modules.length
+    ? d.modules.map(m => ({...m, videos: m.video_ids.map(id => byId[id])}))
+    : [{title: running ? "Videos (grouping into topics once all are processed)" : "Videos", description: "", videos: d.videos}];
+  const failed = d.modules.length ? d.videos.filter(v => !v.notes) : [];
+  if (failed.length) groups.push({title: "Could not process", description: "These videos had no captions or description to work from.", videos: failed});
+
+  document.getElementById("nav").innerHTML = groups.map((g, i) =>
+    `<a href="#m${i}">${esc(g.title)} <span class="count">${g.videos.length}</span></a>`).join("");
+  document.getElementById("content").innerHTML = groups.map((g, i) => `
+    <section class="module" id="m${i}">
+      <h2>${d.modules.length && i < d.modules.length ? `Module ${i + 1}: ` : ""}${esc(g.title)}</h2>
+      ${g.description ? `<p>${esc(g.description)}</p>` : ""}
+      ${g.videos.map(videoHtml).join("")}
+    </section>`).join("");
+  document.querySelectorAll("details.video").forEach(e => { if (open.has(e.dataset.id)) e.open = true; });
+  document.getElementById("layout").hidden = false;
+  document.getElementById("toolbar").hidden = false;
+  applySearch();
+}
+
+function applySearch() {
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  document.querySelectorAll("details.video").forEach(e => { e.hidden = q && !e.dataset.search.includes(q); });
+  document.querySelectorAll("section.module").forEach(s => {
+    s.hidden = q && !s.querySelector("details.video:not([hidden])");
+  });
+}
+
+async function poll() {
+  const res = await fetch(`/api/channel/${encodeURIComponent(SLUG)}`);
+  const d = await res.json();
+  const key = `${d.status}|${d.done}|${d.modules.length}|${d.error}`;
+  if (key !== lastKey) { lastKey = key; render(d); }
+  if (!["done", "error"].includes(d.status)) setTimeout(poll, 2000);
+}
+
+document.getElementById("search").addEventListener("input", applySearch);
+document.getElementById("expand").onclick = () => document.querySelectorAll("details.video:not([hidden])").forEach(e => e.open = true);
+document.getElementById("collapse").onclick = () => document.querySelectorAll("details.video").forEach(e => e.open = false);
+poll();
+</script>
+</body>
+</html>

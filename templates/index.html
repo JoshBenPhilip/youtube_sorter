@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Course Sorter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="top"><a class="brand" href="/">▶ YouTube Course Sorter</a></header>
+<main class="wrap narrow">
+  <h1>Turn a YouTube channel into a course</h1>
+  <p class="muted">Paste a channel link. Every video gets a summary, key takeaways and a timestamped table of
+    contents, and the videos are grouped into topic modules.</p>
+
+  <div class="card">
+    <form class="start" method="post" action="/start">
+      <input type="text" name="url" required autofocus
+             placeholder="https://www.youtube.com/@channelname  or  @channelname">
+      <div class="row">
+        <input type="number" name="limit" min="1" placeholder="Max videos">
+        <button type="submit">Organize channel</button>
+      </div>
+      <small class="muted">Leave “Max videos” empty to process the whole channel (newest first). Try 10 first to
+        check the results. Playlist links work too.</small>
+    </form>
+    {% if not has_key %}
+    <div class="warn"><strong>No ANTHROPIC_API_KEY set.</strong> Stop the server, set the key (see README) and start it again.</div>
+    {% endif %}
+  </div>
+
+  {% if channels %}
+  <h2 style="margin-top:32px">Previous channels</h2>
+  <div class="card">
+    <ul class="history">
+      {% for c in channels %}
+      <li>
+        <a href="{{ url_for('channel', slug=c.slug) }}">{{ c.title }}</a>
+        <span class="pill {{ c.status }}">{{ c.status }}{% if c.total %} · {{ c.done }}/{{ c.total }}{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</main>
+</body>
+</html>
